@@ -23,10 +23,11 @@ import math
 class HypernetworkDoubleLinearModule(torch.nn.Module):
     multiplier = 1.0
 
-    def __init__(self, dim, p=0.1, n=4, first_bias=False, state_dict=None):
+    def __init__(self, dim, init_strength=0.1, n=4, first_bias=False, state_dict=None):
         super().__init__()
         self.dim = dim
         self.weight_norm = False
+        self.first_bias = first_bias
 
         self.linear1 = torch.nn.Linear(dim, dim//n, bias=first_bias)
         self.linear2 = torch.nn.Linear(dim//n, dim)
@@ -34,12 +35,14 @@ class HypernetworkDoubleLinearModule(torch.nn.Module):
         if state_dict is not None:
             self.load_state_dict(state_dict, strict=True)
         else:
-            std = math.sqrt(p) * math.sqrt(2/(dim+dim/n))
+            std = math.sqrt(init_strength) * math.sqrt(2/(dim+dim/n))
         
             self.linear1.weight.data.normal_(mean=0.0, std=std)
             self.linear2.weight.data.normal_(mean=0.0, std=std)
 
-            self.linear1.bias.data.zero_()
+            if first_bias:
+                self.linear1.bias.data.zero_()
+            
             self.linear2.bias.data.zero_()
 
         self.to(devices.device)
@@ -48,7 +51,16 @@ class HypernetworkDoubleLinearModule(torch.nn.Module):
         return x + self.linear2(self.linear1(x)) * self.multiplier
     
     def weights(self):
-        return list(self.linear1.parameters()) + list(self.linear2.parameters())
+        if self.weight_norm:
+            weights = [self.linear1.weight_v, self.linear1.weight_g, self.linear2.weight_v, self.linear2.weight_g, self.linear2.bias]
+        else:
+            weights = [self.linear1.weight, self.linear2.weight, self.linear2.bias]
+        
+        if self.first_bias:
+            weights += [self.linear1.bias]
+        
+        return weights
+        
     
     def param_norm(self):
         weight = self.linear2.weight @ self.linear1.weight
@@ -65,19 +77,33 @@ class HypernetworkDoubleLinearModule(torch.nn.Module):
             self.linear1 = torch.nn.utils.remove_weight_norm(self.linear1, name='weight')
             self.linear2 = torch.nn.utils.remove_weight_norm(self.linear2, name='weight')
             self.weight_norm = False
+    
+    def state_dict(self, *args, **kwargs):
+        state_dict = super().state_dict(*args, **kwargs)
+        if self.weight_norm:
+            state_dict['linear1.weight'] = self.linear1.weight
+            state_dict['linear2.weight'] = self.linear2.weight
 
-"""
-Model for backcompability with old hypernetworks
-"""
+            del state_dict['linear1.weight_v']
+            del state_dict['linear1.weight_g']
+            del state_dict['linear2.weight_v']
+            del state_dict['linear2.weight_g']
+        
+        return state_dict
+
+
 class HypernetworkDoubleLinearModuleBias(HypernetworkDoubleLinearModule):
-    def __init__(self, dim, p=0.1, n=4, state_dict=None):
-        super().__init__(dim, p=p, n=n, first_bias=True, state_dict=state_dict)
+    """
+    Model for backcompability with old hypernetworks
+    """
+    def __init__(self, dim, init_strength=0.1, n=4, state_dict=None):
+        super().__init__(dim, init_strength=init_strength, n=n, first_bias=True, state_dict=state_dict)
     
 
 class HypernetworkLinearModule(torch.nn.Module):
     multiplier = 1.0
 
-    def __init__(self, dim, p=0.1, state_dict=None):
+    def __init__(self, dim, init_strength=0.1, state_dict=None):
         super().__init__()
         self.dim = dim
         self.weight_norm = False
@@ -87,7 +113,7 @@ class HypernetworkLinearModule(torch.nn.Module):
         if state_dict is not None:
             self.load_state_dict(state_dict, strict=True)
         else:
-            self.linear.weight.data.normal_(mean=0.0, std=p/math.sqrt(dim))
+            self.linear.weight.data.normal_(mean=0.0, std=init_strength/math.sqrt(dim))
             self.linear.bias.data.zero_()
 
         self.to(devices.device)
@@ -96,7 +122,12 @@ class HypernetworkLinearModule(torch.nn.Module):
         return x + self.linear(x) * self.multiplier
     
     def weights(self):
-        return list(self.linear.parameters())
+        if self.weight_norm:
+            weights = [self.linear.weight_v, self.linear.weight_g, self.linear.bias]
+        else:
+            weights = [self.linear.weight, self.linear.bias]
+        
+        return weights
     
     def param_norm(self):
         if self.weight_norm:
@@ -113,6 +144,16 @@ class HypernetworkLinearModule(torch.nn.Module):
         if self.weight_norm:
             self.linear = torch.nn.utils.remove_weight_norm(self.linear, name='weight')
             self.weight_norm = False
+    
+    def state_dict(self, *args, **kwargs):
+        state_dict = super().state_dict(*args, **kwargs)
+        if self.weight_norm:
+            state_dict['linear1.weight'] = self.linear.weight
+
+            del state_dict['linear.weight_v']
+            del state_dict['linear.weight_g']
+        
+        return state_dict
 
 
 def apply_strength(value=None):
@@ -155,16 +196,11 @@ class Hypernetwork:
         state_dict = {}
 
         for k, v in self.layers.items():
-            if v[0].weight_norm:
-                v[0].remove_weight_norm()
-            if v[1].weight_norm:
-                v[1].remove_weight_norm()
-            
             state_dict[k] = (v[0].state_dict(), v[1].state_dict())
 
         state_dict['step'] = self.step
         state_dict['name'] = self.name
-        state_dict['HypernetworkType'] = self.HypernetworkModule.__class__.__name__
+        state_dict['HypernetworkType'] = self.HypernetworkModule.__name__
         state_dict['sd_checkpoint'] = self.sd_checkpoint
         state_dict['sd_checkpoint_name'] = self.sd_checkpoint_name
 
@@ -188,11 +224,15 @@ class Hypernetwork:
         state_dict = torch.load(filename, map_location='cpu')
 
         if 'HypernetworkType' in state_dict:
+            print(f"Loading {state_dict['HypernetworkType']} from {filename}")
+
             if state_dict['HypernetworkType'] == 'HypernetworkLinearModule':
                 self.HypernetworkModule = HypernetworkLinearModule
+
             elif state_dict['HypernetworkType'] == 'HypernetworkDoubleLinearModule':
                 self.HypernetworkModule = HypernetworkDoubleLinearModule
         else:
+            print("Warning: HypernetworkType not found in state_dict, assuming Old HypernetworkDoubleLinearModuleBias")
             self.HypernetworkModule = HypernetworkDoubleLinearModuleBias
 
         for size, sd in state_dict.items():
@@ -302,7 +342,7 @@ def stack_conds(conds):
 
     return torch.stack(conds)
 
-def train_hypernetwork(hypernetwork_name, learn_rate, batch_size, data_root, log_directory, steps, create_image_every, save_hypernetwork_every, template_file, preview_from_txt2img, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_index, preview_cfg_scale, preview_seed, preview_width, preview_height, weight_norm=True):
+def train_hypernetwork(hypernetwork_name, learn_rate, batch_size, data_root, log_directory, steps, create_image_every, save_hypernetwork_every, template_file, preview_from_txt2img, weight_norm, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_index, preview_cfg_scale, preview_seed, preview_width, preview_height):
     assert hypernetwork_name, 'hypernetwork not selected'
 
     path = shared.hypernetworks.get(hypernetwork_name, None)
@@ -342,7 +382,7 @@ def train_hypernetwork(hypernetwork_name, learn_rate, batch_size, data_root, log
     for weight in weights:
         weight.requires_grad = True
 
-    losses = torch.zeros((32,))
+    losses = torch.zeros((64,))
 
     last_saved_file = "<none>"
     last_saved_image = "<none>"

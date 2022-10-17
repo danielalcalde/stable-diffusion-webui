@@ -16,10 +16,12 @@ def create_hypernetwork(name, enable_sizes, init_strength, n_layers, reduction):
 
     if n_layers == 1:
         HypernetworkModule = modules.hypernetworks.hypernetwork.HypernetworkLinearModule
-        HypernetworkModule_init  = lambda dim: HypernetworkModule(dim, p=init_strength)
-    else:
+        HypernetworkModule_init  = lambda dim: HypernetworkModule(dim, init_strength=init_strength)
+    elif n_layers == 2:
         HypernetworkModule = modules.hypernetworks.hypernetwork.HypernetworkDoubleLinearModule
-        HypernetworkModule_init = lambda dim: modules.HypernetworkModule(dim, n=reduction, p=init_strength)
+        HypernetworkModule_init = lambda dim: HypernetworkModule(dim, n=reduction, init_strength=init_strength)
+    else:
+        raise ValueError("n_layers must be 1 or 2")
 
     hypernet = modules.hypernetworks.hypernetwork.Hypernetwork(name=name, enable_sizes=[int(x) for x in enable_sizes],
                                                                HypernetworkModule=HypernetworkModule, HypernetworkModule_init=HypernetworkModule_init)
