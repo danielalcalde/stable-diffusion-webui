@@ -1194,6 +1194,9 @@ def create_ui(wrap_gradio_gpu_call):
                 with gr.Tab(label="Create hypernetwork"):
                     new_hypernetwork_name = gr.Textbox(label="Name")
                     new_hypernetwork_sizes = gr.CheckboxGroup(label="Modules", value=["768", "320", "640", "1280"], choices=["768", "320", "640", "1280"])
+                    new_hypernetwork_strength = gr.Text(label='Init. strength', placeholder="Init. strength", value="0.1")
+                    new_hypernetwork_layers = gr.Slider(label="Layers", minimum=1, maximum=2, step=1, value=1)
+                    new_hypernetwork_reduction = gr.Slider(label="Reduction - only applies if Layers==2", minimum=2, maximum=8, step=1, value=4)
 
                     with gr.Row():
                         with gr.Column(scale=3):
@@ -1229,7 +1232,7 @@ def create_ui(wrap_gradio_gpu_call):
                     with gr.Row():
                         train_hypernetwork_name = gr.Dropdown(label='Hypernetwork', elem_id="train_hypernetwork", choices=[x for x in shared.hypernetworks.keys()])
                         create_refresh_button(train_hypernetwork_name, shared.reload_hypernetworks, lambda: {"choices": sorted([x for x in shared.hypernetworks.keys()])}, "refresh_train_hypernetwork_name")
-                    learn_rate = gr.Textbox(label='Learning rate', placeholder="Learning rate", value="0.005")
+                    learn_rate = gr.Textbox(label='Learning rate', placeholder="Learning rate", value="5e-5")
                     batch_size = gr.Number(label='Batch size', value=1, precision=0)
                     dataset_directory = gr.Textbox(label='Dataset directory', placeholder="Path to directory with input images")
                     log_directory = gr.Textbox(label='Log directory', placeholder="Path to directory where to write outputs", value="textual_inversion")
@@ -1241,6 +1244,7 @@ def create_ui(wrap_gradio_gpu_call):
                     save_embedding_every = gr.Number(label='Save a copy of embedding to log directory every N steps, 0 to disable', value=500, precision=0)
                     save_image_with_stored_embedding = gr.Checkbox(label='Save images with embedding in PNG chunks', value=True)
                     preview_from_txt2img = gr.Checkbox(label='Read parameters (prompt, etc...) from txt2img tab when making previews', value=False)
+                    weight_norm = gr.Checkbox(label='Use weight normalization', value=True)
 
                     with gr.Row():
                         interrupt_training = gr.Button(value="Interrupt")
@@ -1276,6 +1280,9 @@ def create_ui(wrap_gradio_gpu_call):
             inputs=[
                 new_hypernetwork_name,
                 new_hypernetwork_sizes,
+                new_hypernetwork_strength,
+                new_hypernetwork_layers,
+                new_hypernetwork_reduction,
             ],
             outputs=[
                 train_hypernetwork_name,
@@ -1342,6 +1349,7 @@ def create_ui(wrap_gradio_gpu_call):
                 save_embedding_every,
                 template_file,
                 preview_from_txt2img,
+                weight_norm,
                 *txt2img_preview_params,
             ],
             outputs=[

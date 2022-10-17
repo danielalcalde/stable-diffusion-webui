@@ -12,55 +12,134 @@ import torch
 from ldm.util import default
 from modules import devices, shared, processing, sd_models
 import torch
-from torch import einsum
+from torch import _weight_norm, einsum
 from einops import rearrange, repeat
 import modules.textual_inversion.dataset
 from modules.textual_inversion import textual_inversion
 from modules.textual_inversion.learn_schedule import LearnRateScheduler
+import math
 
 
-class HypernetworkModule(torch.nn.Module):
+class HypernetworkDoubleLinearModule(torch.nn.Module):
     multiplier = 1.0
 
-    def __init__(self, dim, state_dict=None):
+    def __init__(self, dim, p=0.1, n=4, first_bias=False, state_dict=None):
         super().__init__()
+        self.dim = dim
+        self.weight_norm = False
 
-        self.linear1 = torch.nn.Linear(dim, dim * 2)
-        self.linear2 = torch.nn.Linear(dim * 2, dim)
+        self.linear1 = torch.nn.Linear(dim, dim//n, bias=first_bias)
+        self.linear2 = torch.nn.Linear(dim//n, dim)
 
         if state_dict is not None:
             self.load_state_dict(state_dict, strict=True)
         else:
+            std = math.sqrt(p) * math.sqrt(2/(dim+dim/n))
+        
+            self.linear1.weight.data.normal_(mean=0.0, std=std)
+            self.linear2.weight.data.normal_(mean=0.0, std=std)
 
-            self.linear1.weight.data.normal_(mean=0.0, std=0.01)
             self.linear1.bias.data.zero_()
-            self.linear2.weight.data.normal_(mean=0.0, std=0.01)
             self.linear2.bias.data.zero_()
 
         self.to(devices.device)
 
     def forward(self, x):
-        return x + (self.linear2(self.linear1(x))) * self.multiplier
+        return x + self.linear2(self.linear1(x)) * self.multiplier
+    
+    def weights(self):
+        return list(self.linear1.parameters()) + list(self.linear2.parameters())
+    
+    def param_norm(self):
+        weight = self.linear2.weight @ self.linear1.weight
+        return torch.std(weight) * math.sqrt(self.dim)
+    
+    def apply_weight_norm(self):
+        if not self.weight_norm:
+            self.linear1 = torch.nn.utils.weight_norm(self.linear1, name='weight')
+            self.linear2 = torch.nn.utils.weight_norm(self.linear2, name='weight')
+            self.weight_norm = True
+    
+    def remove_weight_norm(self):
+        if self.weight_norm:
+            self.linear1 = torch.nn.utils.remove_weight_norm(self.linear1, name='weight')
+            self.linear2 = torch.nn.utils.remove_weight_norm(self.linear2, name='weight')
+            self.weight_norm = False
+
+"""
+Model for backcompability with old hypernetworks
+"""
+class HypernetworkDoubleLinearModuleBias(HypernetworkDoubleLinearModule):
+    def __init__(self, dim, p=0.1, n=4, state_dict=None):
+        super().__init__(dim, p=p, n=n, first_bias=True, state_dict=state_dict)
+    
+
+class HypernetworkLinearModule(torch.nn.Module):
+    multiplier = 1.0
+
+    def __init__(self, dim, p=0.1, state_dict=None):
+        super().__init__()
+        self.dim = dim
+        self.weight_norm = False
+
+        self.linear = torch.nn.Linear(dim, dim)
+
+        if state_dict is not None:
+            self.load_state_dict(state_dict, strict=True)
+        else:
+            self.linear.weight.data.normal_(mean=0.0, std=p/math.sqrt(dim))
+            self.linear.bias.data.zero_()
+
+        self.to(devices.device)
+
+    def forward(self, x):
+        return x + self.linear(x) * self.multiplier
+    
+    def weights(self):
+        return list(self.linear.parameters())
+    
+    def param_norm(self):
+        if self.weight_norm:
+            return torch.std(self.linear.weight_g) * math.sqrt(self.dim)
+        else:
+            return torch.std(self.linear.weight) * math.sqrt(self.dim)
+    
+    def apply_weight_norm(self):
+        if not self.weight_norm:
+            self.linear = torch.nn.utils.weight_norm(self.linear, name='weight')
+            self.weight_norm = True
+    
+    def remove_weight_norm(self):
+        if self.weight_norm:
+            self.linear = torch.nn.utils.remove_weight_norm(self.linear, name='weight')
+            self.weight_norm = False
 
 
 def apply_strength(value=None):
-    HypernetworkModule.multiplier = value if value is not None else shared.opts.sd_hypernetwork_strength
+    HypernetworkLinearModule.multiplier = value if value is not None else shared.opts.sd_hypernetwork_strength
+    HypernetworkDoubleLinearModule.multiplier = value if value is not None else shared.opts.sd_hypernetwork_strength
+    HypernetworkDoubleLinearModuleBias.multiplier = value if value is not None else shared.opts.sd_hypernetwork_strength
 
 
 class Hypernetwork:
     filename = None
     name = None
 
-    def __init__(self, name=None, enable_sizes=None):
+    def __init__(self, weight_norm=False, name=None, enable_sizes=None, HypernetworkModule=HypernetworkLinearModule, HypernetworkModule_init=None):
         self.filename = None
         self.name = name
         self.layers = {}
         self.step = 0
         self.sd_checkpoint = None
         self.sd_checkpoint_name = None
+        self.HypernetworkModule = HypernetworkModule
+        if HypernetworkModule_init is None:
+            HypernetworkModule_init = HypernetworkModule
+
+        self.weight_norm = weight_norm
 
         for size in enable_sizes or []:
-            self.layers[size] = (HypernetworkModule(size), HypernetworkModule(size))
+            self.layers[size] = (HypernetworkModule_init(size), HypernetworkModule_init(size))
 
     def weights(self):
         res = []
@@ -68,7 +147,7 @@ class Hypernetwork:
         for k, layers in self.layers.items():
             for layer in layers:
                 layer.train()
-                res += [layer.linear1.weight, layer.linear1.bias, layer.linear2.weight, layer.linear2.bias]
+                res += layer.weights()
 
         return res
 
@@ -76,14 +155,30 @@ class Hypernetwork:
         state_dict = {}
 
         for k, v in self.layers.items():
+            if v[0].weight_norm:
+                v[0].remove_weight_norm()
+            if v[1].weight_norm:
+                v[1].remove_weight_norm()
+            
             state_dict[k] = (v[0].state_dict(), v[1].state_dict())
 
         state_dict['step'] = self.step
         state_dict['name'] = self.name
+        state_dict['HypernetworkType'] = self.HypernetworkModule.__class__.__name__
         state_dict['sd_checkpoint'] = self.sd_checkpoint
         state_dict['sd_checkpoint_name'] = self.sd_checkpoint_name
 
         torch.save(state_dict, filename)
+    
+    def param_norm(self):
+        res = 0
+        n = 0
+        for k, v in self.layers.items():
+            for layer in v:
+                res += layer.param_norm()
+                n += 1
+        
+        return res / n
 
     def load(self, filename):
         self.filename = filename
@@ -92,9 +187,20 @@ class Hypernetwork:
 
         state_dict = torch.load(filename, map_location='cpu')
 
+        if 'HypernetworkType' in state_dict:
+            if state_dict['HypernetworkType'] == 'HypernetworkLinearModule':
+                self.HypernetworkModule = HypernetworkLinearModule
+            elif state_dict['HypernetworkType'] == 'HypernetworkDoubleLinearModule':
+                self.HypernetworkModule = HypernetworkDoubleLinearModule
+        else:
+            self.HypernetworkModule = HypernetworkDoubleLinearModuleBias
+
         for size, sd in state_dict.items():
             if type(size) == int:
-                self.layers[size] = (HypernetworkModule(size, sd[0]), HypernetworkModule(size, sd[1]))
+                self.layers[size] = (self.HypernetworkModule(size, state_dict=sd[0]), self.HypernetworkModule(size, state_dict=sd[1]))
+                if self.weight_norm:
+                    self.layers[size][0].apply_weight_norm()
+                    self.layers[size][1].apply_weight_norm()
 
         self.name = state_dict.get('name', self.name)
         self.step = state_dict.get('step', 0)
@@ -196,11 +302,11 @@ def stack_conds(conds):
 
     return torch.stack(conds)
 
-def train_hypernetwork(hypernetwork_name, learn_rate, batch_size, data_root, log_directory, steps, create_image_every, save_hypernetwork_every, template_file, preview_from_txt2img, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_index, preview_cfg_scale, preview_seed, preview_width, preview_height):
+def train_hypernetwork(hypernetwork_name, learn_rate, batch_size, data_root, log_directory, steps, create_image_every, save_hypernetwork_every, template_file, preview_from_txt2img, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_index, preview_cfg_scale, preview_seed, preview_width, preview_height, weight_norm=True):
     assert hypernetwork_name, 'hypernetwork not selected'
 
     path = shared.hypernetworks.get(hypernetwork_name, None)
-    shared.loaded_hypernetwork = Hypernetwork()
+    shared.loaded_hypernetwork = Hypernetwork(weight_norm=weight_norm)
     shared.loaded_hypernetwork.load(path)
 
     shared.state.textinfo = "Initializing hypernetwork training..."
@@ -272,10 +378,13 @@ def train_hypernetwork(hypernetwork_name, learn_rate, batch_size, data_root, log
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+        
         mean_loss = losses.mean()
+        param_norm = hypernetwork.param_norm()
+
         if torch.isnan(mean_loss):
             raise RuntimeError("Loss diverged.")
-        pbar.set_description(f"loss: {mean_loss:.7f}")
+        pbar.set_description(f"loss: {mean_loss:.7f}, param norm: {param_norm:.7f}")
 
         if hypernetwork.step > 0 and hypernetwork_dir is not None and hypernetwork.step % save_hypernetwork_every == 0:
             last_saved_file = os.path.join(hypernetwork_dir, f'{hypernetwork_name}-{hypernetwork.step}.pt')
@@ -283,6 +392,7 @@ def train_hypernetwork(hypernetwork_name, learn_rate, batch_size, data_root, log
 
         textual_inversion.write_loss(log_directory, "hypernetwork_loss.csv", hypernetwork.step, len(ds), {
             "loss": f"{mean_loss:.7f}",
+            "param_norm": f"{param_norm:.7f}",
             "learn_rate": scheduler.learn_rate
         })
 
@@ -331,6 +441,7 @@ def train_hypernetwork(hypernetwork_name, learn_rate, batch_size, data_root, log
         shared.state.textinfo = f"""
 <p>
 Loss: {mean_loss:.7f}<br/>
+Param norm: {param_norm:.7f}<br/>
 Step: {hypernetwork.step}<br/>
 Last prompt: {html.escape(entries[0].cond_text)}<br/>
 Last saved embedding: {html.escape(last_saved_file)}<br/>

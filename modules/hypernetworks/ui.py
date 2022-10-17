@@ -9,11 +9,20 @@ from modules import sd_hijack, shared, devices
 from modules.hypernetworks import hypernetwork
 
 
-def create_hypernetwork(name, enable_sizes):
+def create_hypernetwork(name, enable_sizes, init_strength, n_layers, reduction):
     fn = os.path.join(shared.cmd_opts.hypernetwork_dir, f"{name}.pt")
     assert not os.path.exists(fn), f"file {fn} already exists"
+    init_strength = float(init_strength)
 
-    hypernet = modules.hypernetworks.hypernetwork.Hypernetwork(name=name, enable_sizes=[int(x) for x in enable_sizes])
+    if n_layers == 1:
+        HypernetworkModule = modules.hypernetworks.hypernetwork.HypernetworkLinearModule
+        HypernetworkModule_init  = lambda dim: HypernetworkModule(dim, p=init_strength)
+    else:
+        HypernetworkModule = modules.hypernetworks.hypernetwork.HypernetworkDoubleLinearModule
+        HypernetworkModule_init = lambda dim: modules.HypernetworkModule(dim, n=reduction, p=init_strength)
+
+    hypernet = modules.hypernetworks.hypernetwork.Hypernetwork(name=name, enable_sizes=[int(x) for x in enable_sizes],
+                                                               HypernetworkModule=HypernetworkModule, HypernetworkModule_init=HypernetworkModule_init)
     hypernet.save(fn)
 
     shared.reload_hypernetworks()
