@@ -29,12 +29,18 @@ class HypernetworkDoubleLinearModule(torch.nn.Module):
         self.weight_norm = False
         self.first_bias = first_bias
 
-        self.linear1 = torch.nn.Linear(dim, dim//n, bias=first_bias)
-        self.linear2 = torch.nn.Linear(dim//n, dim)
-
         if state_dict is not None:
+            shape = state_dict['linear1.weight'].shape
+            first_bias = 'linear1.bias' in state_dict
+
+            self.linear1 = torch.nn.Linear(shape[1], shape[0], bias=first_bias)
+            self.linear2 = torch.nn.Linear(shape[0], shape[1])
+
             self.load_state_dict(state_dict, strict=True)
         else:
+            self.linear1 = torch.nn.Linear(dim, dim//n, bias=first_bias)
+            self.linear2 = torch.nn.Linear(dim//n, dim)
+
             std = math.sqrt(init_strength) * math.sqrt(2/(dim+dim/n))
         
             self.linear1.weight.data.normal_(mean=0.0, std=std)
