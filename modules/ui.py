@@ -1245,6 +1245,7 @@ def create_ui(wrap_gradio_gpu_call):
                     save_image_with_stored_embedding = gr.Checkbox(label='Save images with embedding in PNG chunks', value=True)
                     preview_from_txt2img = gr.Checkbox(label='Read parameters (prompt, etc...) from txt2img tab when making previews', value=False)
                     weight_norm = gr.Checkbox(label='Use weight normalization', value=True)
+                    #weight_norm_freeze = gr.Checkbox(label='Freeze weight normalization', value=False)
 
                     with gr.Row():
                         interrupt_training = gr.Button(value="Interrupt")
@@ -1350,6 +1351,7 @@ def create_ui(wrap_gradio_gpu_call):
                 template_file,
                 preview_from_txt2img,
                 weight_norm,
+                #weight_norm_freeze,
                 *txt2img_preview_params,
             ],
             outputs=[

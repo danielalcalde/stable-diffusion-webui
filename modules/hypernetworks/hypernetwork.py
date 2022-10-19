@@ -27,6 +27,7 @@ class HypernetworkDoubleLinearModule(torch.nn.Module):
         super().__init__()
         self.dim = dim
         self.weight_norm = False
+        self.weight_norm_freeze = False
         self.first_bias = first_bias
 
         if state_dict is not None:
@@ -57,10 +58,14 @@ class HypernetworkDoubleLinearModule(torch.nn.Module):
         return x + self.linear2(self.linear1(x)) * self.multiplier
     
     def weights(self):
+        weights = [self.linear2.bias]
+
         if self.weight_norm:
-            weights = [self.linear1.weight_v, self.linear1.weight_g, self.linear2.weight_v, self.linear2.weight_g, self.linear2.bias]
+            weights += [self.linear1.weight_v, self.linear2.weight_v]
+            if not self.weight_norm_freeze:
+                weights += [self.linear1.weight_g, self.linear2.weight_g]
         else:
-            weights = [self.linear1.weight, self.linear2.weight, self.linear2.bias]
+            weights += [self.linear1.weight, self.linear2.weight]
         
         if self.first_bias:
             weights += [self.linear1.bias]
@@ -113,6 +118,7 @@ class HypernetworkLinearModule(torch.nn.Module):
         super().__init__()
         self.dim = dim
         self.weight_norm = False
+        self.weight_norm_freeze = False
 
         self.linear = torch.nn.Linear(dim, dim)
 
@@ -128,10 +134,13 @@ class HypernetworkLinearModule(torch.nn.Module):
         return x + self.linear(x) * self.multiplier
     
     def weights(self):
+        weights = [self.linear.bias]
         if self.weight_norm:
-            weights = [self.linear.weight_v, self.linear.weight_g, self.linear.bias]
+            weights += [self.linear.weight_v]
+            if not self.weight_norm_freeze:
+                weights += [self.linear.weight_g]
         else:
-            weights = [self.linear.weight, self.linear.bias]
+            weights += [self.linear.weight]
         
         return weights
     
@@ -154,7 +163,7 @@ class HypernetworkLinearModule(torch.nn.Module):
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
         if self.weight_norm:
-            state_dict['linear1.weight'] = self.linear.weight
+            state_dict['linear.weight'] = self.linear.weight
 
             del state_dict['linear.weight_v']
             del state_dict['linear.weight_g']
@@ -172,7 +181,7 @@ class Hypernetwork:
     filename = None
     name = None
 
-    def __init__(self, weight_norm=False, name=None, enable_sizes=None, HypernetworkModule=HypernetworkLinearModule, HypernetworkModule_init=None):
+    def __init__(self, weight_norm=False, weight_norm_freeze=False, name=None, enable_sizes=None, HypernetworkModule=HypernetworkLinearModule, HypernetworkModule_init=None):
         self.filename = None
         self.name = name
         self.layers = {}
@@ -180,10 +189,12 @@ class Hypernetwork:
         self.sd_checkpoint = None
         self.sd_checkpoint_name = None
         self.HypernetworkModule = HypernetworkModule
+
         if HypernetworkModule_init is None:
             HypernetworkModule_init = HypernetworkModule
 
         self.weight_norm = weight_norm
+        self.weight_norm_freeze = weight_norm_freeze
 
         for size in enable_sizes or []:
             self.layers[size] = (HypernetworkModule_init(size), HypernetworkModule_init(size))
@@ -247,6 +258,11 @@ class Hypernetwork:
                 if self.weight_norm:
                     self.layers[size][0].apply_weight_norm()
                     self.layers[size][1].apply_weight_norm()
+
+                    if self.weight_norm_freeze:
+                        self.layers[size][0].weight_norm_freeze = True
+                        self.layers[size][1].weight_norm_freeze = True
+                        
 
         self.name = state_dict.get('name', self.name)
         self.step = state_dict.get('step', 0)
@@ -352,7 +368,7 @@ def train_hypernetwork(hypernetwork_name, learn_rate, batch_size, data_root, log
     assert hypernetwork_name, 'hypernetwork not selected'
 
     path = shared.hypernetworks.get(hypernetwork_name, None)
-    shared.loaded_hypernetwork = Hypernetwork(weight_norm=weight_norm)
+    shared.loaded_hypernetwork = Hypernetwork(weight_norm=weight_norm, weight_norm_freeze=False)
     shared.loaded_hypernetwork.load(path)
 
     shared.state.textinfo = "Initializing hypernetwork training..."
