@@ -63,7 +63,7 @@ class HypernetworkDoubleLinearModule(torch.nn.Module):
         if self.weight_norm:
             weights += [self.linear1.weight_v, self.linear2.weight_v]
             if not self.weight_norm_freeze:
-                weights += [self.linear1.weight_g, self.linear2.weight_g]
+                weights += [self.linear1.weight_g]
         else:
             weights += [self.linear1.weight, self.linear2.weight]
         
@@ -439,10 +439,13 @@ def train_hypernetwork(hypernetwork_name, learn_rate, batch_size, data_root, log
 
             optimizer.zero_grad()
             loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(weights, 0.1)
+            
             optimizer.step()
         
         mean_loss = losses.mean()
         param_norm = hypernetwork.param_norm()
+
 
         if torch.isnan(mean_loss):
             raise RuntimeError("Loss diverged.")
